@@ -1,11 +1,4 @@
-"""
-Link Inspector v2 - Phishing & Malicious URL Classifier (Streamlit)
-
-Run:  streamlit run app.py
-Folder must contain:  features.py, phishing_model.pkl   (from train.py)
-Recommended:          .streamlit/config.toml            (dark theme, see notes)
-Optional:             metrics.json                      (scores shown in sidebar)
-"""
+import socket
 import html
 import json
 import math
@@ -13,12 +6,15 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-
+import io
+import urllib.request
+import zipfile
 import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+import tldextract
 
 from features import FEATURE_NAMES, extract_features, normalize
 
@@ -328,10 +324,78 @@ def tree_votes(X: pd.DataFrame):
     except Exception:
         return []
 
+# =============================================================================
+# WHITELIST & URL HELPERS
+# =============================================================================
+# Platforms where ANYONE can publish a page. Phishing is often hosted on them, so a link
+# on these domains must never be auto-passed by reputation, however popular the platform is.
+SHARED_HOSTS = {
+    "google.com", "googleapis.com", "googleusercontent.com",
+    "amazonaws.com", "azurewebsites.net", "windows.net", "firebaseapp.com", "web.app", "appspot.com",
+    "weebly.com", "wixsite.com", "wix.com", "wordpress.com", "blogspot.com", "herokuapp.com",
+    "netlify.app", "vercel.app", "pages.dev", "workers.dev", "r2.dev", "glitch.me", "repl.co",
+    "000webhostapp.com", "ngrok.io", "ngrok-free.app", "sharepoint.com", "dropbox.com", "notion.site",
+    "notion.so", "canva.com", "typeform.com", "forms.gle", "live.com", "office.com", "mailchimp.com",
+    # URL shorteners hide the real destination
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd", "rebrand.ly", "cutt.ly", "lnkd.in",
+}
+UMBRELLA_URL = "https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip"
+LOCAL_TRUSTED = BASE / "trusted_domains.txt"   # your own list: one domain per line, # for comments
 
-# =============================================================================
-# URL HELPERS
-# =============================================================================
+
+TRANCO_PATH = BASE / "top-1m.csv"
+
+@st.cache_data(ttl=86400, show_spinner="Loading trusted-domain list...")
+def load_whitelist() -> frozenset:
+    """Top popular domains from your local top-1m.csv + your local trusted_domains.txt."""
+    domains = set()
+    
+    # 1. Load the top 10,000 domains directly from your local top-1m.csv file
+    if TRANCO_PATH.exists():
+        try:
+            # Reads the file (assumes CSV format: rank, domain with no header)
+            df = pd.read_csv(TRANCO_PATH, header=None, nrows=10000, names=["rank", "domain"])
+            domains |= set(df["domain"].astype(str).str.lower())
+        except Exception as e:
+            print(f"Error loading local top-1m.csv: {e}")
+    else:
+        print("Local top-1m.csv not found in project directory.")
+
+    # 2. Load any custom overrides from trusted_domains.txt
+    if LOCAL_TRUSTED.exists():
+        for line in LOCAL_TRUSTED.read_text().splitlines():
+            line = line.split("#")[0].strip().lower()
+            if line:
+                domains.add(line)
+                
+    return frozenset(domains)
+
+
+TRUSTED_DOMAINS = load_whitelist()
+
+
+def trust_match(url: str):
+    """Return the trusted entry that covers this URL's real destination, else None."""
+    ext = tldextract.extract(normalize(url))          # strips user@ and :port
+    if not ext.suffix or not ext.domain:               # IP addresses, bare words
+        return None
+    
+    reg = f"{ext.domain}.{ext.suffix}".lower()         # e.g., github.com, wikipedia.org
+    host = ".".join(p for p in (ext.subdomain, reg) if p).lower()
+    
+    # Platforms where anyone can host files should not be blindly trusted
+    if reg in SHARED_HOSTS or host in SHARED_HOSTS:
+        return None
+        
+    # Check if the exact host or the root registered domain is in trusted lists
+    if host in TRUSTED_DOMAINS:
+        return host
+    if reg in TRUSTED_DOMAINS:
+        return reg
+        
+    return None
+
+
 IP_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
 SECOND_LEVEL = {"co", "com", "org", "net", "gov", "edu", "ac", "or", "ne"}
 URL_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*://)?([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$")
@@ -357,23 +421,23 @@ def anatomy_segments(url: str):
     if "@" in netloc:
         userinfo, netloc = netloc.rsplit("@", 1)
         segs.append((userinfo + "@", "userinfo", "ignored by browsers"))
+        
     host, port = netloc, ""
     if re.search(r":\d+$", host):
         host, port = host.rsplit(":", 1)
         port = ":" + port
+        
     if IP_RE.match(host):
         segs.append((host, "ip", "raw IP address"))
     elif host:
-        labels = host.split(".")
-        n = 3 if (len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in SECOND_LEVEL) else 2
-        if len(labels) < n:
-            segs.append((host, "domain", "domain"))
-        else:
-            sub = labels[:-n]
-            if sub:
-                segs.append((".".join(sub) + ".", "subdomain", "subdomain"))
-            segs.append((labels[-n], "domain", "real domain"))
-            segs.append(("." + ".".join(labels[-n + 1:]), "suffix", "ending"))
+        ext = tldextract.extract(host)
+        if ext.subdomain:
+            segs.append((ext.subdomain + ".", "subdomain", "subdomain"))
+        if ext.domain:
+            segs.append((ext.domain, "domain", "real domain"))
+        if ext.suffix:
+            segs.append(("." + ext.suffix, "suffix", "ending"))
+            
     if port:
         segs.append((port, "port", "port"))
     if path:
@@ -410,7 +474,6 @@ def indicators(vec):
         num("Randomness", "entropy", 4.6, 5.0, "High entropy means less readable, more machine-made text.", "{:.2f}"),
     ]
 
-
 # =============================================================================
 # STATE & CALLBACKS
 # =============================================================================
@@ -429,15 +492,33 @@ for k, v in {"history": [], "result": None, "url_input": "", "input_error": "",
 def run_scan(url: str) -> None:
     url = (url or "").strip()
     st.session_state["input_error"] = ""
-    host = normalize(url).split("/")[0] if url else ""
+    host = normalize(url).split("/")[0].lower() if url else ""
+    
     if not url:
         st.session_state["input_error"] = "Enter a URL to inspect."
+        return
     elif len(url) > 4096:
         st.session_state["input_error"] = "That URL is over 4,096 characters. Paste a shorter link."
+        return
     elif "." not in host and not IP_RE.match(host):
         st.session_state["input_error"] = "That doesn't look like a web address. Try example.com/login."
-    else:
-        st.session_state["pending"] = url
+        return
+
+    # DNS Verification Check
+    try:
+        ext = tldextract.extract(host)
+        lookup_host = f"{ext.subdomain}.{ext.domain}.{ext.suffix}".strip('.')
+        # Only check DNS if it is a domain name (not a raw IP address)
+        if lookup_host and not IP_RE.match(lookup_host):
+            socket.setdefaulttimeout(3.0)
+            socket.gethostbyname(lookup_host)
+    except socket.gaierror:
+        st.session_state["input_error"] = f"Domain does not exist or is offline: '{lookup_host}'"
+        return
+    except socket.timeout:
+        pass # If DNS is just slow, let the model score it anyway
+
+    st.session_state["pending"] = url
 
 
 def scan_from_input() -> None:
@@ -534,7 +615,7 @@ with st.sidebar:
                         help="Plays a short scanning sequence before each result.")
 
     H('<div class="side-h">Model</div>')
-    rows = [("Algorithm", "Random Forest"), ("Trees", str(N_TREES or "-")), ("Features", str(len(FEATURE_NAMES)))]
+    rows = [("Algorithm", "Random Forest"), ("Trees", str(N_TREES or "-")), ("Features", str(len(FEATURE_NAMES))), ("Trusted list", f"{len(TRUSTED_DOMAINS):,}")]
     metrics = load_metrics()
     if metrics:
         for key, label in [("accuracy", "Accuracy"), ("precision", "Precision"), ("recall", "Recall"), ("f1", "F1 score")]:
@@ -621,6 +702,7 @@ with tab_scan:
             ph.markdown(scan_html(2, pending), unsafe_allow_html=True)
         prob = float(model.predict_proba(X)[0][POS])
         votes = tree_votes(X)
+        trusted = trust_match(pending)
         time.sleep(pause)
         if animate:
             ph.markdown(scan_html(3, pending), unsafe_allow_html=True)
@@ -629,10 +711,10 @@ with tab_scan:
 
         st.session_state["scan_id"] += 1
         st.session_state["result"] = {"url": pending, "prob": prob, "votes": votes, "vec": vec,
-                                      "sid": st.session_state["scan_id"]}
-        st.session_state["history"].insert(0, {"time": datetime.now().strftime("%H:%M:%S"), "url": pending, "prob": prob})
+                                      "trusted": trusted, "sid": st.session_state["scan_id"]}
+        st.session_state["history"].insert(0, {"time": datetime.now().strftime("%H:%M:%S"), "url": pending, "prob": prob, "trusted": trusted})
         st.session_state["history"] = st.session_state["history"][:8]
-        if prob >= threshold:
+        if prob >= threshold and not trusted:
             st.toast("Malicious link detected", icon="🚨")
         else:
             st.toast("No threat patterns found", icon="✅")
@@ -648,11 +730,24 @@ with tab_scan:
         </div>""")
     else:
         url, prob, votes, sid = res["url"], res["prob"], res["votes"], res["sid"]
-        bad = prob >= threshold
+        trusted = res.get("trusted")
+        flagged = prob >= threshold
+        bad = flagged and not trusted
         kind = "risk" if bad else "safe"
-        title = "Likely phishing or malicious" if bad else "Looks safe"
-        sub = ("Do not open this link, and never enter passwords, card numbers or personal details on it."
-               if bad else "No strong phishing patterns in the URL structure. Still be careful with links you did not expect.")
+        if trusted and flagged:
+            title = "Trusted domain"
+            sub = (f"The model scored this link {prob:.0%}, but {trusted} is on the trusted list, so it is treated as safe. "
+                   "Attackers can still abuse trusted sites, so stay alert.")
+        elif trusted:
+            title = "Looks safe"
+            sub = f"No strong phishing patterns, and {trusted} is on the trusted list."
+        elif bad:
+            title = "Likely phishing or malicious"
+            sub = "Do not open this link, and never enter passwords, card numbers or personal details on it."
+        else:
+            title = "Looks safe"
+            sub = "No strong phishing patterns in the URL structure. Still be careful with links you did not expect."
+        trust_chip = f'<span class="chip">Trusted list <b>{html.escape(trusted)}</b></span>' if trusted else ""
         n_flag = sum(1 for v in votes if v >= 0.5)
         tree_chip = f'<span class="chip"><b>{n_flag}</b> of <b>{len(votes)}</b> trees flag it</span>' if votes else ""
 
@@ -670,7 +765,7 @@ with tab_scan:
             <div class="v-sub">{sub}</div>
             <div class="chips">
               <span class="chip">Exact score <b>{prob * 100:.1f}%</b></span>
-              <span class="chip">Flag threshold <b>{threshold:.0%}</b></span>{tree_chip}
+              <span class="chip">Flag threshold <b>{threshold:.0%}</b></span>{tree_chip}{trust_chip}
             </div>
           </div>
         </div>""")
@@ -748,8 +843,10 @@ with tab_scan:
     if hist:
         trs = ""
         for h in hist:
-            b = h["prob"] >= threshold
-            pill = f'<span class="pill {"risk" if b else "safe"}">{"Malicious" if b else "Safe"}</span>'
+            tr_ = h.get("trusted")
+            b = h["prob"] >= threshold and not tr_
+            lab = "Malicious" if b else ("Trusted" if tr_ and h["prob"] >= threshold else "Safe")
+            pill = f'<span class="pill {"risk" if b else "safe"}">{lab}</span>'
             col = "#FF3B5C" if b else "#25D985"
             trs += (f'<tr><td>{h["time"]}</td><td class="u" title="{html.escape(h["url"])}">{html.escape(clip(h["url"], 70))}</td>'
                     f'<td><span class="pbar"><i style="width:{h["prob"] * 100:.0f}%;background:{col}"></i></span>{h["prob"] * 100:.1f}%</td>'
@@ -790,7 +887,9 @@ with tab_batch:
             Xb = pd.DataFrame([extract_features(u) for u in urls], columns=FEATURE_NAMES)
             probs = model.predict_proba(Xb)[:, POS]
         out = pd.DataFrame({"url": urls, "malicious_probability": probs})
-        out["verdict"] = np.where(probs >= threshold, "Malicious", "Safe")
+        trusted_mask = np.array([trust_match(u) is not None for u in urls])
+        out["trusted"] = trusted_mask
+        out["verdict"] = np.where((probs >= threshold) & ~trusted_mask, "Malicious", "Safe")
         n_bad = int((out["verdict"] == "Malicious").sum())
         n_all = len(out)
         bsid = 9000 + (abs(hash((n_all, n_bad, round(threshold, 2)))) % 90000)
