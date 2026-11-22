@@ -309,6 +309,42 @@ def load_metrics():
     return None
 
 
+def download_model(url: str):
+    """Download model file with progress tracking and User-Agent headers."""
+    gdrive_match = re.search(r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)", url)
+    if gdrive_match:
+        file_id = gdrive_match.group(1)
+        url = f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
+    
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    )
+    temp_path = MODEL_PATH.with_suffix(".tmp")
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp, open(temp_path, "wb") as out_file:
+            total_size = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            progress_bar = st.progress(0, text="Downloading pre-trained model weights...")
+            chunk_size = 1024 * 1024
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    pct = min(1.0, downloaded / total_size)
+                    progress_bar.progress(pct, text=f"Downloading model: {downloaded / (1024*1024):.1f} MB / {total_size / (1024*1024):.1f} MB ({pct*100:.0f}%)")
+            progress_bar.empty()
+        temp_path.replace(MODEL_PATH)
+        return True, "Model weights downloaded successfully!"
+    except Exception as e:
+        if temp_path.exists():
+            temp_path.unlink()
+        return False, str(e)
+
+
 def ensure_model_available():
     """Ensure phishing_model.pkl exists, downloading from MODEL_URL secret/env if configured."""
     if not MODEL_PATH.exists():
@@ -323,26 +359,49 @@ def ensure_model_available():
         
         if model_url:
             with st.spinner("Downloading pre-trained model weights (phishing_model.pkl)... Please wait."):
-                try:
-                    urllib.request.urlretrieve(model_url, MODEL_PATH)
-                    st.success("Model weights downloaded successfully!")
-                except Exception as e:
-                    st.error(f"Failed to download model weights from `{model_url}`: {e}")
+                ok, msg = download_model(model_url)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(f"Failed to download model weights from `{model_url}`: {msg}")
 
 ensure_model_available()
 
 if not MODEL_PATH.exists():
-    st.error(
-        "### ⚠️ Model file not found (`phishing_model.pkl`)\n\n"
-        "The model weights file is not present in the repository (GitHub restricts files >100 MB).\n\n"
-        "**To resolve this on Streamlit Cloud:**\n"
-        "1. Upload `phishing_model.pkl` to a **GitHub Release**, **Hugging Face**, or public **Google Drive / S3** link.\n"
-        "2. In your Streamlit Cloud app settings, go to **Settings → Secrets** and add:\n"
-        "   ```toml\n"
-        "   MODEL_URL = \"https://your-public-download-link/phishing_model.pkl\"\n"
-        "   ```\n"
-        "3. Or run the training notebook (`network_security_project.ipynb`) in Google Colab / Jupyter to generate the file."
+    st.error("### ⚠️ Model file not found (`phishing_model.pkl`)")
+    st.markdown(
+        "The trained Random Forest model (~246 MB) exceeds GitHub's 100 MB file limit and cannot be tracked directly in Git.\n\n"
+        "**To activate the model, choose one of the options below:**"
     )
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("##### 🌐 Option A: Provide a Model URL")
+        st.caption("Paste a direct download link (e.g. from GitHub Releases, Hugging Face, or Google Drive):")
+        url_input = st.text_input("Model Download URL", placeholder="https://github.com/.../releases/download/.../phishing_model.pkl")
+        if st.button("Download & Activate Model", type="primary", use_container_width=True):
+            if url_input.strip():
+                with st.spinner("Downloading model weights..."):
+                    ok, msg = download_model(url_input.strip())
+                    if ok:
+                        st.success(msg)
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Download failed: {msg}")
+            else:
+                st.warning("Please enter a valid URL.")
+        st.info("💡 **Tip**: To make this automatic on every reboot, add `MODEL_URL = \"https://...\"` in **Streamlit Cloud Settings → Secrets**.")
+    with col2:
+        st.markdown("##### 📁 Option B: Direct Upload")
+        st.caption("Upload `phishing_model.pkl` directly from your local computer into this session:")
+        uploaded = st.file_uploader("Upload phishing_model.pkl", type=["pkl"])
+        if uploaded is not None:
+            with st.spinner("Saving uploaded model..."):
+                with open(MODEL_PATH, "wb") as f:
+                    f.write(uploaded.getbuffer())
+                st.success("Model uploaded successfully!")
+                time.sleep(1)
+                st.rerun()
     st.stop()
 
 model = load_model()
