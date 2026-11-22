@@ -150,7 +150,7 @@ The project features a **Streamlit dark cyber-themed dashboard**:
 Intelligent Phishing & Malicious URL Classifier/
 ├── app.py                     # Root entrypoint wrapper (Streamlit Community Cloud compatible)
 ├── requirements.txt           # Primary dependencies at repository root
-├── train.py                   # Standalone training & evaluation pipeline script
+├── network_security_project.ipynb # Google Colab / Jupyter notebook for model training & evaluation
 ├── urldata.csv                # Primary labeled dataset (450,176 URLs)
 ├── README.md                  # Comprehensive project documentation
 ├── .gitignore                 # Excludes caches, virtualenvs, and large model binaries (>100MB)
@@ -266,25 +266,15 @@ When your app boots, it will automatically download `phishing_model.pkl` into th
 
 ---
 
-## ⚙️ Model Training & Retraining
+## ⚙️ Model Training (Google Colab / Jupyter)
 
-You can retrain the model locally using `train.py`:
+Model training, feature engineering experiments, and benchmark evaluations are implemented in [`network_security_project.ipynb`](file:///d:/Intelligent%20Phishing%20&%20Malicious%20URL%20Classifier/network_security_project.ipynb).
 
-```bash
-# Full training run on all 450,176 URLs with Tranco augmentation:
-python train.py
-
-# Fast test run using a sample of 25,000 URLs:
-SAMPLE=25000 python train.py
-```
-
-The script will:
-1. Load `urldata.csv` and deduplicate records.
-2. Augment benign domains from the local Tranco Top 1M list (`dashboard/top-1m.csv`).
-3. Extract all 20 lexical features.
-4. Fit a `RandomForestClassifier(n_estimators=300, min_samples_leaf=2, class_weight='balanced')`.
-5. Output accuracy, precision, recall, confusion matrix, and feature importances.
-6. Export the compressed model to `dashboard/phishing_model.pkl` and benchmark scores to `dashboard/metrics.json`.
+To train or reproduce the model in **Google Colab** or **Jupyter**:
+1. Open `network_security_project.ipynb` in Google Colab.
+2. Load `urldata.csv` and `dashboard/top-1m.csv`.
+3. Execute the notebook cells to extract features and train the `RandomForestClassifier(n_estimators=300)`.
+4. The notebook outputs the evaluation metrics and exports `phishing_model.pkl` and `metrics.json`.
 
 ---
 

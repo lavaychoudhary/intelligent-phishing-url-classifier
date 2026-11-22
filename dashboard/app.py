@@ -341,7 +341,7 @@ if not MODEL_PATH.exists():
         "   ```toml\n"
         "   MODEL_URL = \"https://your-public-download-link/phishing_model.pkl\"\n"
         "   ```\n"
-        "3. Or run `python train.py` locally if running on your machine."
+        "3. Or run the training notebook (`network_security_project.ipynb`) in Google Colab / Jupyter to generate the file."
     )
     st.stop()
 
