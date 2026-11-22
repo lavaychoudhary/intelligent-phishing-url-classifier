@@ -1,3 +1,5 @@
+import os
+import sys
 import socket
 import html
 import json
@@ -16,9 +18,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 import tldextract
 
+BASE = Path(__file__).resolve().parent
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
+
 from features import FEATURE_NAMES, extract_features, normalize
 
-BASE = Path(__file__).parent
 MODEL_PATH = BASE / "phishing_model.pkl"
 METRICS_PATH = BASE / "metrics.json"
 
@@ -304,9 +309,40 @@ def load_metrics():
     return None
 
 
+def ensure_model_available():
+    """Ensure phishing_model.pkl exists, downloading from MODEL_URL secret/env if configured."""
+    if not MODEL_PATH.exists():
+        model_url = None
+        try:
+            if "MODEL_URL" in st.secrets:
+                model_url = st.secrets["MODEL_URL"]
+        except Exception:
+            pass
+        if not model_url:
+            model_url = os.environ.get("MODEL_URL")
+        
+        if model_url:
+            with st.spinner("Downloading pre-trained model weights (phishing_model.pkl)... Please wait."):
+                try:
+                    urllib.request.urlretrieve(model_url, MODEL_PATH)
+                    st.success("Model weights downloaded successfully!")
+                except Exception as e:
+                    st.error(f"Failed to download model weights from `{model_url}`: {e}")
+
+ensure_model_available()
+
 if not MODEL_PATH.exists():
-    st.error("**Model file not found.** Run `python train.py` first so `phishing_model.pkl` "
-             "is created in this folder, then reload this page.")
+    st.error(
+        "### ⚠️ Model file not found (`phishing_model.pkl`)\n\n"
+        "The model weights file is not present in the repository (GitHub restricts files >100 MB).\n\n"
+        "**To resolve this on Streamlit Cloud:**\n"
+        "1. Upload `phishing_model.pkl` to a **GitHub Release**, **Hugging Face**, or public **Google Drive / S3** link.\n"
+        "2. In your Streamlit Cloud app settings, go to **Settings → Secrets** and add:\n"
+        "   ```toml\n"
+        "   MODEL_URL = \"https://your-public-download-link/phishing_model.pkl\"\n"
+        "   ```\n"
+        "3. Or run `python train.py` locally if running on your machine."
+    )
     st.stop()
 
 model = load_model()
